@@ -1,9 +1,10 @@
 import cv2
 import mediapipe as mp
-import winsound
 
+from hardware.demo_alert import DemoAlert
 from drowsiness.detector import DrowsinessDetector
 from drowsiness.thresholds import get_threshold
+from hardware.controller import AlertController
 from utils.ear import calculate_ear
 
 # Eye landmark indices
@@ -43,7 +44,9 @@ detector = DrowsinessDetector(
     drowsy_duration=2.0
 )
 
-alert_active = False
+# Alert controller setup
+alert_controller = AlertController()
+demo_alert = DemoAlert()
 
 # Extract eye points
 def get_eye_points(face_landmarks, indices, width, height):
@@ -106,14 +109,10 @@ while True:
 
     state = detector.update(left_ear, right_ear)
 
-    # Demo alert
-    if state == "DROWSY" and not alert_active:
-        print("DROWSY ALERT")
-        winsound.Beep(1000, 500)
-        alert_active = True
+    alert_controller.update(state)
 
-    elif state != "DROWSY":
-        alert_active = False
+    # Demo alert
+    demo_alert.update(state)
 
     # Draw eye landmarks
     for point in eye_points:
