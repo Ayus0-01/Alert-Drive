@@ -1,46 +1,60 @@
 import cv2
 import mediapipe as mp
 
+from drowsiness.detector import DrowsinessDetector
+from drowsiness.thresholds import get_threshold
+from hardware.controller import AlertController
+from hardware.demo_alert import DemoAlert
 from utils.ear import calculate_ear
 
 
-# --------------------------------------------------
-# MediaPipe eye landmark indices
-# --------------------------------------------------
+# Eye landmark indices
+LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144]
+RIGHT_EYE_INDICES = [362, 385, 387, 263, 373, 380]
 
-LEFT_EYE_INDICES = [
-    33,
-    160,
-    158,
-    133,
-    153,
-    144
-]
+# MediaPipe setup
+BaseOptions = mp.tasks.BaseOptions
+FaceLandmarker = mp.tasks.vision.FaceLandmarker
+FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
+VisionRunningMode = mp.tasks.vision.RunningMode
 
-RIGHT_EYE_INDICES = [
-    362,
-    385,
-    387,
-    263,
-    373,
-    380
-]
+options = FaceLandmarkerOptions(
+    base_options=BaseOptions(
+        model_asset_path="assets/face_landmarker.task"
+    ),
+    running_mode=VisionRunningMode.IMAGE,
+    num_faces=1
+)
+
+landmarker = FaceLandmarker.create_from_options(options)
+
+# Camera setup
+camera = cv2.VideoCapture(0)
+
+if not camera.isOpened():
+    print("ERROR: Could not open camera.")
+    landmarker.close()
+    exit()
+
+# Detection setup
+threshold = get_threshold()
+
+detector = DrowsinessDetector(
+    threshold=threshold,
+    warning_duration=1.0,
+    drowsy_duration=2.0
+)
+
+# Alert setup
+alert_controller = AlertController()
+demo_alert = DemoAlert()
 
 
-# --------------------------------------------------
-# Eye landmark extraction
-# --------------------------------------------------
-
-def get_eye_points(face_landmarks, eye_indices, width, height):
-    """
-    Convert MediaPipe normalized landmarks into
-    pixel coordinates.
-    """
-
+# Extract eye points
+def get_eye_points(face_landmarks, indices, width, height):
     points = []
 
-    for index in eye_indices:
-
+    for index in indices:
         landmark = face_landmarks[index]
 
         x = int(landmark.x * width)
@@ -51,129 +65,138 @@ def get_eye_points(face_landmarks, eye_indices, width, height):
     return points
 
 
-# --------------------------------------------------
-# Create Face Landmarker
-# --------------------------------------------------
+# Process frame
+def process_frame(frame):
+    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-BaseOptions = mp.tasks.BaseOptions
-FaceLandmarker = mp.tasks.vision.FaceLandmarker
-FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
-VisionRunningMode = mp.tasks.vision.RunningMode
-
-
-options = FaceLandmarkerOptions(
-    base_options=BaseOptions(
-        model_asset_path="assets/face_landmarker.task"
-    ),
-    running_mode=VisionRunningMode.IMAGE,
-    num_faces=2
-)
-
-
-landmarker = FaceLandmarker.create_from_options(options)
-
-# Open camera
-
-camera = cv2.VideoCapture(0)
-
-
-if not camera.isOpened():
-    print("Camera failed")
-    exit()
-
-# Main processing loop
-
-while True:
-
-    success, frame = camera.read()
-
-    if not success:
-        print("Could not receive frame")
-        break
-
-    # Convert OpenCV BGR image to RGB
-    rgb_frame = cv2.cvtColor(
-        frame,
-        cv2.COLOR_BGR2RGB
-    )
-
-    # Convert image into MediaPipe format
     mp_image = mp.Image(
         image_format=mp.ImageFormat.SRGB,
         data=rgb_frame
     )
 
-    # Detect facial landmarks
     result = landmarker.detect(mp_image)
 
-    # Process detected face
+    if not result.face_landmarks:
+        return None, None, []
 
-    if result.face_landmarks:
+    face_landmarks = result.face_landmarks[0]
 
-        # Primary face
-        face_landmarks = result.face_landmarks[0]
+    height, width, _ = frame.shape
 
-        height, width, _ = frame.shape
+    left_eye_points = get_eye_points(
+        face_landmarks,
+        LEFT_EYE_INDICES,
+        width,
+        height
+    )
 
-        # Extract eye landmarks
+    right_eye_points = get_eye_points(
+        face_landmarks,
+        RIGHT_EYE_INDICES,
+        width,
+        height
+    )
 
-        left_eye_points = get_eye_points(
-            face_landmarks,
-            LEFT_EYE_INDICES,
-            width,
-            height
+    left_ear = calculate_ear(left_eye_points)
+    right_ear = calculate_ear(right_eye_points)
+
+    return (
+        left_ear,
+        right_ear,
+        left_eye_points + right_eye_points
+    )
+
+
+# Main processing loop
+while True:
+    success, frame = camera.read()
+
+    if not success:
+        print("ERROR: Could not read camera frame.")
+        break
+
+    left_ear, right_ear, eye_points = process_frame(frame)
+
+    state = detector.update(left_ear, right_ear)
+
+    alert_controller.update(state)
+    demo_alert.update(state)
+
+    # Draw eye landmarks
+    for point in eye_points:
+        cv2.circle(
+            frame,
+            point,
+            2,
+            (0, 255, 0),
+            -1
         )
 
-        right_eye_points = get_eye_points(
-            face_landmarks,
-            RIGHT_EYE_INDICES,
-            width,
-            height
-        )
-
-        # Calculate EAR
-
-        left_ear = calculate_ear(left_eye_points)
-        right_ear = calculate_ear(right_eye_points)
-
-        ear = (left_ear + right_ear) / 2.0
-
-        # Display EAR
+    # Display detection data
+    if left_ear is not None and right_ear is not None:
+        average_ear = (left_ear + right_ear) / 2.0
 
         cv2.putText(
             frame,
-            f"EAR: {ear:.3f}",
-            (30, 50),
+            f"Left EAR: {left_ear:.3f}",
+            (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 0),
+            0.7,
+            (255, 255, 255),
             2
         )
 
-        # Draw eye landmarks
+        cv2.putText(
+            frame,
+            f"Right EAR: {right_ear:.3f}",
+            (20, 75),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
 
-        for point in left_eye_points:
+        cv2.putText(
+            frame,
+            f"Average EAR: {average_ear:.3f}",
+            (20, 110),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
 
-            cv2.circle(
-                frame,
-                point,
-                3,
-                (255, 0, 0),
-                -1
-            )
+    else:
+        cv2.putText(
+            frame,
+            "EAR: --",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (255, 255, 255),
+            2
+        )
 
+    # Display threshold and state
+    cv2.putText(
+        frame,
+        f"Threshold: {threshold:.3f}",
+        (20, 145),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (255, 255, 255),
+        2
+    )
 
-        for point in right_eye_points:
-
-            cv2.circle(
-                frame,
-                point,
-                3,
-                (255, 0, 0),
-                -1
-            )
-
-    # Display frame
+    cv2.putText(
+        frame,
+        f"State: {state}",
+        (20, 180),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (255, 255, 255),
+        2
+    )
 
     cv2.imshow(
         "Driver Drowsiness Detection",
@@ -181,14 +204,11 @@ while True:
     )
 
     # Quit
-
     if cv2.waitKey(1) & 0xFF == ord("q"):
         break
 
 
 # Cleanup
-
 camera.release()
 cv2.destroyAllWindows()
-
 landmarker.close()
