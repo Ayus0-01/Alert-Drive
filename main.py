@@ -12,11 +12,13 @@ from utils.ear import calculate_ear
 LEFT_EYE_INDICES = [33, 160, 158, 133, 153, 144]
 RIGHT_EYE_INDICES = [362, 385, 387, 263, 373, 380]
 
+
 # MediaPipe setup
 BaseOptions = mp.tasks.BaseOptions
 FaceLandmarker = mp.tasks.vision.FaceLandmarker
 FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
+
 
 options = FaceLandmarkerOptions(
     base_options=BaseOptions(
@@ -28,13 +30,13 @@ options = FaceLandmarkerOptions(
 
 landmarker = FaceLandmarker.create_from_options(options)
 
-# Camera setup
-camera = cv2.VideoCapture(0)
 
-if not camera.isOpened():
-    print("ERROR: Could not open camera.")
-    landmarker.close()
-    exit()
+# Camera setup
+cap = cv2.VideoCapture(0)
+
+if not cap.isOpened():
+    raise RuntimeError("Could not open camera.")
+
 
 # Detection setup
 threshold = get_threshold()
@@ -45,29 +47,40 @@ detector = DrowsinessDetector(
     drowsy_duration=2.0
 )
 
-# Alert setup
 alert_controller = AlertController()
 demo_alert = DemoAlert()
 
 
-# Extract eye points
 def get_eye_points(face_landmarks, indices, width, height):
-    points = []
+    normalized_points = []
+    pixel_points = []
 
     for index in indices:
         landmark = face_landmarks[index]
 
-        x = int(landmark.x * width)
-        y = int(landmark.y * height)
+        # Keep normalized precision for EAR
+        normalized_points.append(
+            (landmark.x, landmark.y)
+        )
 
-        points.append((x, y))
+        # Convert only for drawing
+        pixel_points.append(
+            (
+                int(landmark.x * width),
+                int(landmark.y * height)
+            )
+        )
 
-    return points
+    return normalized_points, pixel_points
 
 
-# Process frame
 def process_frame(frame):
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    height, width = frame.shape[:2]
+
+    rgb_frame = cv2.cvtColor(
+        frame,
+        cv2.COLOR_BGR2RGB
+    )
 
     mp_image = mp.Image(
         image_format=mp.ImageFormat.SRGB,
@@ -77,53 +90,72 @@ def process_frame(frame):
     result = landmarker.detect(mp_image)
 
     if not result.face_landmarks:
-        return None, None, []
+        return None, None, None, None
 
     face_landmarks = result.face_landmarks[0]
 
-    height, width, _ = frame.shape
-
-    left_eye_points = get_eye_points(
+    left_eye, left_eye_pixels = get_eye_points(
         face_landmarks,
         LEFT_EYE_INDICES,
         width,
         height
     )
 
-    right_eye_points = get_eye_points(
+    right_eye, right_eye_pixels = get_eye_points(
         face_landmarks,
         RIGHT_EYE_INDICES,
         width,
         height
     )
 
-    left_ear = calculate_ear(left_eye_points)
-    right_ear = calculate_ear(right_eye_points)
+    left_ear = calculate_ear(left_eye)
+    right_ear = calculate_ear(right_eye)
+
+    average_ear = (left_ear + right_ear) / 2.0
 
     return (
         left_ear,
         right_ear,
-        left_eye_points + right_eye_points
+        average_ear,
+        left_eye_pixels,
+        right_eye_pixels
     )
 
 
-# Main processing loop
 while True:
-    success, frame = camera.read()
+    ret, frame = cap.read()
 
-    if not success:
-        print("ERROR: Could not read camera frame.")
+    if not ret:
+        print("Failed to read frame.")
         break
 
-    left_ear, right_ear, eye_points = process_frame(frame)
+    result = process_frame(frame)
 
-    state = detector.update(left_ear, right_ear)
+    if result[0] is None:
+        left_ear = None
+        right_ear = None
+        average_ear = None
+        left_eye_pixels = []
+        right_eye_pixels = []
+    else:
+        (
+            left_ear,
+            right_ear,
+            average_ear,
+            left_eye_pixels,
+            right_eye_pixels
+        ) = result
+
+    state = detector.update(
+        left_ear,
+        right_ear
+    )
 
     alert_controller.update(state)
     demo_alert.update(state)
 
-    # Draw eye landmarks
-    for point in eye_points:
+    # Draw landmarks
+    for point in left_eye_pixels:
         cv2.circle(
             frame,
             point,
@@ -132,16 +164,23 @@ while True:
             -1
         )
 
-    # Display detection data
-    if left_ear is not None and right_ear is not None:
-        average_ear = (left_ear + right_ear) / 2.0
+    for point in right_eye_pixels:
+        cv2.circle(
+            frame,
+            point,
+            2,
+            (0, 255, 0),
+            -1
+        )
 
+    # Display values
+    if average_ear is not None:
         cv2.putText(
             frame,
             f"Left EAR: {left_ear:.3f}",
-            (20, 40),
+            (20, 30),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
+            0.6,
             (255, 255, 255),
             2
         )
@@ -149,9 +188,9 @@ while True:
         cv2.putText(
             frame,
             f"Right EAR: {right_ear:.3f}",
-            (20, 75),
+            (20, 55),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
+            0.6,
             (255, 255, 255),
             2
         )
@@ -159,31 +198,19 @@ while True:
         cv2.putText(
             frame,
             f"Average EAR: {average_ear:.3f}",
-            (20, 110),
+            (20, 80),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
+            0.6,
             (255, 255, 255),
             2
         )
 
-    else:
-        cv2.putText(
-            frame,
-            "EAR: --",
-            (20, 40),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),
-            2
-        )
-
-    # Display threshold and state
     cv2.putText(
         frame,
         f"Threshold: {threshold:.3f}",
-        (20, 145),
+        (20, 105),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
+        0.6,
         (255, 255, 255),
         2
     )
@@ -191,10 +218,10 @@ while True:
     cv2.putText(
         frame,
         f"State: {state}",
-        (20, 180),
+        (20, 135),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (255, 255, 255),
+        0.7,
+        (0, 255, 255),
         2
     )
 
@@ -203,12 +230,12 @@ while True:
         frame
     )
 
-    # Quit
-    if cv2.waitKey(1) & 0xFF == ord("q"):
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == ord("q"):
         break
 
 
-# Cleanup
-camera.release()
+cap.release()
 cv2.destroyAllWindows()
 landmarker.close()
