@@ -1,10 +1,10 @@
+
 import cv2
 import mediapipe as mp
 
 from drowsiness.detector import DrowsinessDetector
 from drowsiness.thresholds import get_threshold
 from hardware.controller import AlertController
-from hardware.demo_alert import DemoAlert
 from utils.ear import calculate_ear
 
 
@@ -28,53 +28,26 @@ options = FaceLandmarkerOptions(
     num_faces=1
 )
 
-landmarker = FaceLandmarker.create_from_options(options)
 
-
-# Camera setup
-cap = cv2.VideoCapture(0)
-
-if not cap.isOpened():
-    raise RuntimeError("Could not open camera.")
-
-
-# Detection setup
-threshold = get_threshold()
-
-detector = DrowsinessDetector(
-    threshold=threshold,
-    warning_duration=1.0,
-    drowsy_duration=2.0
-)
-
-alert_controller = AlertController()
-demo_alert = DemoAlert()
-
-
+# Extract eye landmarks
 def get_eye_points(face_landmarks, indices, width, height):
-    normalized_points = []
+    ear_points = []
     pixel_points = []
 
     for index in indices:
         landmark = face_landmarks[index]
 
-        # Keep normalized precision for EAR
-        normalized_points.append(
-            (landmark.x, landmark.y)
-        )
+        x = landmark.x * width
+        y = landmark.y * height
 
-        # Convert only for drawing
-        pixel_points.append(
-            (
-                int(landmark.x * width),
-                int(landmark.y * height)
-            )
-        )
+        ear_points.append((x, y))
+        pixel_points.append((int(x), int(y)))
 
-    return normalized_points, pixel_points
+    return ear_points, pixel_points
 
 
-def process_frame(frame):
+# Process camera frame
+def process_frame(frame, landmarker):
     height, width = frame.shape[:2]
 
     rgb_frame = cv2.cvtColor(
@@ -90,7 +63,7 @@ def process_frame(frame):
     result = landmarker.detect(mp_image)
 
     if not result.face_landmarks:
-        return None, None, None, None
+        return None, None, None, [], []
 
     face_landmarks = result.face_landmarks[0]
 
@@ -122,120 +95,160 @@ def process_frame(frame):
     )
 
 
-while True:
-    ret, frame = cap.read()
+def main():
+    landmarker = None
+    cap = None
 
-    if not ret:
-        print("Failed to read frame.")
-        break
-
-    result = process_frame(frame)
-
-    if result[0] is None:
-        left_ear = None
-        right_ear = None
-        average_ear = None
-        left_eye_pixels = []
-        right_eye_pixels = []
-    else:
-        (
-            left_ear,
-            right_ear,
-            average_ear,
-            left_eye_pixels,
-            right_eye_pixels
-        ) = result
-
-    state = detector.update(
-        left_ear,
-        right_ear
-    )
-
-    alert_controller.update(state)
-    demo_alert.update(state)
-
-    # Draw landmarks
-    for point in left_eye_pixels:
-        cv2.circle(
-            frame,
-            point,
-            2,
-            (0, 255, 0),
-            -1
+    try:
+        landmarker = mp.tasks.vision.FaceLandmarker.create_from_options(
+            options
         )
 
-    for point in right_eye_pixels:
-        cv2.circle(
-            frame,
-            point,
-            2,
-            (0, 255, 0),
-            -1
+        cap = cv2.VideoCapture(0)
+
+        if not cap.isOpened():
+            raise RuntimeError("Could not open camera.")
+
+        # Detection setup
+        threshold = get_threshold()
+
+        detector = DrowsinessDetector(
+            threshold=threshold,
+            warning_duration=1.0,
+            drowsy_duration=2.0
         )
 
-    # Display values
-    if average_ear is not None:
-        cv2.putText(
-            frame,
-            f"Left EAR: {left_ear:.3f}",
-            (20, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2
-        )
+        alert_controller = AlertController()
 
-        cv2.putText(
-            frame,
-            f"Right EAR: {right_ear:.3f}",
-            (20, 55),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2
-        )
+        print("Driver Drowsiness Detection Started")
+        print(f"EAR Threshold: {threshold:.4f}")
+        print("Press Q to exit.")
 
-        cv2.putText(
-            frame,
-            f"Average EAR: {average_ear:.3f}",
-            (20, 80),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 255, 255),
-            2
-        )
+        while True:
+            ret, frame = cap.read()
 
-    cv2.putText(
-        frame,
-        f"Threshold: {threshold:.3f}",
-        (20, 105),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.6,
-        (255, 255, 255),
-        2
-    )
+            if not ret:
+                print("Failed to read camera frame.")
+                break
 
-    cv2.putText(
-        frame,
-        f"State: {state}",
-        (20, 135),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0, 255, 255),
-        2
-    )
+            (
+                left_ear,
+                right_ear,
+                average_ear,
+                left_eye_pixels,
+                right_eye_pixels
+            ) = process_frame(frame, landmarker)
 
-    cv2.imshow(
-        "Driver Drowsiness Detection",
-        frame
-    )
+            # Update detection state
+            state = detector.update(
+                left_ear,
+                right_ear
+            )
 
-    key = cv2.waitKey(1) & 0xFF
+            # Update alert controller
+            alert_controller.update(state)
 
-    if key == ord("q"):
-        break
+            # Draw eye landmarks
+            for point in left_eye_pixels:
+                cv2.circle(
+                    frame,
+                    point,
+                    2,
+                    (0, 255, 0),
+                    -1
+                )
+
+            for point in right_eye_pixels:
+                cv2.circle(
+                    frame,
+                    point,
+                    2,
+                    (0, 255, 0),
+                    -1
+                )
+
+            # Display EAR values
+            if average_ear is not None:
+                cv2.putText(
+                    frame,
+                    f"Left EAR: {left_ear:.3f}",
+                    (20, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2
+                )
+
+                cv2.putText(
+                    frame,
+                    f"Right EAR: {right_ear:.3f}",
+                    (20, 55),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2
+                )
+
+                cv2.putText(
+                    frame,
+                    f"Average EAR: {average_ear:.3f}",
+                    (20, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2
+                )
+            else:
+                cv2.putText(
+                    frame,
+                    "Face not detected",
+                    (20, 80),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 255),
+                    2
+                )
+
+            # Display threshold and state
+            cv2.putText(
+                frame,
+                f"Threshold: {threshold:.3f}",
+                (20, 105),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (255, 255, 255),
+                2
+            )
+
+            cv2.putText(
+                frame,
+                f"State: {state}",
+                (20, 135),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 255, 255),
+                2
+            )
+
+            cv2.imshow(
+                "Driver Drowsiness Detection",
+                frame
+            )
+
+            key = cv2.waitKey(1) & 0xFF
+
+            if key == ord("q"):
+                break
+
+    finally:
+        if cap is not None:
+            cap.release()
+
+        cv2.destroyAllWindows()
+
+        if landmarker is not None:
+            landmarker.close()
 
 
-cap.release()
-cv2.destroyAllWindows()
-landmarker.close()
+if __name__ == "__main__":
+    main()
